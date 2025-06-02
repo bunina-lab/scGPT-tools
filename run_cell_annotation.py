@@ -6,18 +6,24 @@ def execute(args):
     from get_cell_annotations import AnnotateCells   
     import os
     import json
+    import scanpy as sc
 
 
-    # Load Reference data
-    print("Loading reference data...")
-    ref_adata = anndata.read_h5ad(args.reference_h5ad)
     
     print("Loading scGPT model...")
-    model_args = args.model_args if args.model_args is not None else os.path.join(args.model_path.split("/")[:-1], "args.json")
-    model_vocab = args.model_vocab if args.model_vocab is not None else os.path.join(args.model_path.split("/")[:-1], "vocab.json")
-    model = scGPTModel(model_path=args.model_path, model_args=model_args, model_vocab=model_vocab)
+    model_dir = os.path.abspath(os.path.dirname(args.model_path))
+    model_args = args.model_args if args.model_args is not None else os.path.join(model_dir, "args.json")
+    model_vocab = args.model_vocab if args.model_vocab is not None else os.path.join(model_dir, "vocab.json")
+    model = scGPTModel(model_file=args.model_path, vocab_file=model_vocab, model_config_file=model_args)
     model.process_init_model()
     
+
+     # Load Reference data
+    print("Loading reference data...")
+    ref_adata = anndata.read_h5ad(args.reference_h5ad)
+    if args.sampling_frac:
+        ref_adata = sc.pp.sample(ref_adata, fraction=args.sampling_frac, copy=True)
+
     # Initialize annotator
     annotator = AnnotateCells(
         model=model,
@@ -67,5 +73,7 @@ if __name__ == "__main__":
                         help='Name of the embedding layer to use')
     parser.add_argument('--k-neighbors', type=int, default=33,
                         help='Number of nearest neighbors to use for annotation')
+    parser.add_argument('--sampling-frac', type=float, default=0.15, help='Sampling fraction of the reference data to be used for cell annotation.')
+    
 
     execute(parser.parse_args()) 

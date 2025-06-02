@@ -96,7 +96,7 @@ class scGPTModel():
             vocab=self.get_vocab(),
             max_length=max_length,
             batch_size=batch_size,
-            model_configs=self.get_model_configs(),
+            model_configs=self.get_config(),
             gene_ids=gene_ids,
             use_batch_labels=use_batch_labels,
         )
