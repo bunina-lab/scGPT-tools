@@ -2,8 +2,6 @@ from scgpt_model import scGPTModel
 import numpy as np
 import pandas as pd
 from sklearn.neighbors import NearestNeighbors
-from typing import List
-from anndata import AnnData
 
 class AnnotateCells:
 

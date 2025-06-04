@@ -5,6 +5,7 @@ from scgpt.model import TransformerModel
 from scgpt.utils import load_pretrained
 import numpy as np
 import scgpt
+from scgpt.tasks import GeneEmbedding
 
 
 class scGPTModel():
@@ -20,6 +21,10 @@ class scGPTModel():
         self.model = None
         self.vocab = None
         self.model_configs = None
+
+        self.model_gene_ids = None
+        self.model_gene_embeddings = None
+        self.model_gene_id_token_dict:dict = None
     
     def process_init_model(self):
         self.load_vocab()
@@ -48,6 +53,7 @@ class scGPTModel():
     def init_model(self):
         # Initialize model
         self.model = TransformerModel(
+            seed=42,
             ntoken=len(self.vocab),
             d_model=self.model_configs["embsize"],
             nhead=self.model_configs["nheads"],
@@ -100,7 +106,46 @@ class scGPTModel():
             gene_ids=gene_ids,
             use_batch_labels=use_batch_labels,
         )
-
+    
     def get_pretrained_genes(self):
         ### Returns genes (tokens) that are already in the vocab file
-        return []
+        if  self.model_gene_ids is None:
+            self.model_gene_ids = np.array(list(self.get_gene2idx.values()))
+        return self.model_gene_ids 
+    
+    def get_gene2idx(self):
+        if self.model_gene_id_token_dict is None:
+            self.model_gene_id_token_dict = self.vocab.get_stoi()
+        return self.model_gene_id_token_dict
+    
+    def get_model_gene_embeddings(self):
+        if self.model_gene_embeddings is None:
+            self.model_gene_embeddings = self.model.encoder(torch.tensor(self.model_gene_ids, dtype=torch.long).to(self.device)).detach().cpu().numpy()
+        return self.model_gene_embeddings
+    
+    @staticmethod
+    def _get_gene_embedding_vectors(embedding_mappings:dict):
+        return GeneEmbedding(embedding_mappings)
+    
+    @staticmethod
+    def _get_gdata(embed:GeneEmbedding, louvain_res=1):
+        return embed.get_adata(resolution=louvain_res)
+    
+    @staticmethod
+    def _get_metagenes(embed:GeneEmbedding, gdata):
+        # Retrieve the gene clusters
+        return embed.get_metagenes(gdata)
+    
+    def get_gene_clusters(self, embedding_mappings:dict, louvain_res=1):
+        embed = self._get_gene_embedding_vectors(embedding_mappings)
+        gdata = self._get_gdata(embed, louvain_res)
+        return self._get_metagenes(embed, gdata)
+    
+    def calc_similarity_score(embed:GeneEmbedding, gene, subset=None):
+        return embed.compute_similarities(gene=gene, subset=subset)
+    
+    def get_gene_order_index(self):
+        return {gene : order_idx for order_idx, gene in enumerate(self.get_gene2idx())}
+    
+    def get_gene_embedding(self, gene):
+        return self.model_gene_embeddings[self.get_gene_order_index()[gene]]

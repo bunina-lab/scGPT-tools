@@ -21,8 +21,12 @@ def execute(args):
      # Load Reference data
     print("Loading reference data...")
     ref_adata = anndata.read_h5ad(args.reference_h5ad)
+    if args.ref_cell_column not in ref_adata.obs.columns:
+        raise KeyError(f"Reference cell key not found in columns:\n{args.ref_cell_column}")
+    
     if args.sampling_frac:
         ref_adata = sc.pp.sample(ref_adata, fraction=args.sampling_frac, copy=True)
+
 
     # Initialize annotator
     annotator = AnnotateCells(
@@ -38,13 +42,12 @@ def execute(args):
     # Process and annotate cells
     print("Annotating cells...")
     for adata_path in args.query_h5ad:
-        q_adata = anndata.read_h5ad(adata_path)
-        annotated_adata = annotator.annotate_cells(q_adata, args.q_gene_column)
+        annotated_adata = annotator.annotate_cells(anndata.read_h5ad(adata_path), args.q_gene_column)
         annotated_adata.write_h5ad(os.path.join(args.output_dir, f"cell_annotated_{os.path.basename(adata_path)}"))
     
     # Save parameters
     with open(os.path.join(args.output_dir, "parameters.json"), "w") as f:
-        json.dump(args, f)
+        json.dump(vars(args), f)
 
     print("Done!")
 
@@ -71,7 +74,7 @@ if __name__ == "__main__":
                         help='Column name in reference data containing gene names')
     parser.add_argument('--embedding-layer', default='X_scGPT',
                         help='Name of the embedding layer to use')
-    parser.add_argument('--k-neighbors', type=int, default=33,
+    parser.add_argument('--k-neighbors', type=int, default=20,
                         help='Number of nearest neighbors to use for annotation')
     parser.add_argument('--sampling-frac', type=float, default=0.15, help='Sampling fraction of the reference data to be used for cell annotation.')
     
