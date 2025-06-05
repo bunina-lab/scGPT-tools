@@ -144,8 +144,17 @@ class scGPTModel():
     def calc_similarity_score(embed:GeneEmbedding, gene, subset=None):
         return embed.compute_similarities(gene=gene, subset=subset)
     
+    def get_cosine_similarity_matrix(gene_embed_matrix:np.array):
+        from sklearn.metrics.pairwise import cosine_similarity
+        # Compute all pairwise cosine similarities at once
+        return cosine_similarity(gene_embed_matrix)
+    
     def get_gene_order_index(self):
         return {gene : order_idx for order_idx, gene in enumerate(self.get_gene2idx())}
     
     def get_gene_embedding(self, gene):
         return self.model_gene_embeddings[self.get_gene_order_index()[gene]]
+    
+    def get_gene_embedding_matrix(self, genes:list):
+        # Get embeddings matrix (genes as rows)
+        return np.array([self.get_gene_embedding(gene) for gene in genes])

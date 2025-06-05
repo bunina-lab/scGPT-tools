@@ -11,6 +11,7 @@ import seaborn as sns
 import networkx as nx
 import pandas as pd
 import tqdm
+from sklearn.metrics.pairwise import cosine_similarity
 
 class ProcessGRN:
     def __init__(self, model:scGPTModel) -> None:
