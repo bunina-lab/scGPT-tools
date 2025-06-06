@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
+from utils import load_model
 
 def execute(args):
     import anndata
-    from scgpt_model import scGPTModel
-    from get_cell_annotations import AnnotateCells   
+    from lib.get_cell_annotations import AnnotateCells   
     import os
     import json
     import scanpy as sc
 
 
-    
     print("Loading scGPT model...")
-    model_dir = os.path.abspath(os.path.dirname(args.model_path))
-    model_args = args.model_args if args.model_args is not None else os.path.join(model_dir, "args.json")
-    model_vocab = args.model_vocab if args.model_vocab is not None else os.path.join(model_dir, "vocab.json")
-    model = scGPTModel(model_file=args.model_path, vocab_file=model_vocab, model_config_file=model_args)
-    model.process_init_model()
+    model = load_model(
+        model_path=args.model_path,
+        model_args_path=args.model_args,
+        model_vocab_path=args.model_vocab
+    )
     
 
      # Load Reference data

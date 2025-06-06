@@ -2,7 +2,7 @@ import json
 import torch
 from scgpt.tokenizer import GeneVocab
 from scgpt.model import TransformerModel
-from scgpt.utils import load_pretrained
+from scgpt.utils import load_pretrained, set_seed
 import numpy as np
 import scgpt
 from scgpt.tasks import GeneEmbedding
@@ -22,9 +22,13 @@ class scGPTModel():
         self.vocab = None
         self.model_configs = None
 
+        self.model_GeneEmbedding= None
         self.model_gene_ids = None
         self.model_gene_embeddings = None
         self.model_gene_id_token_dict:dict = None
+        self.gene_order_dict = None
+
+        self.ntokens = None
     
     def process_init_model(self):
         self.load_vocab()
@@ -42,6 +46,8 @@ class scGPTModel():
                 self.vocab.append_token(s)
         
         self.vocab.set_default_index(self.vocab[pad_token])
+        self.ntokens = len(self.vocab)  # size of vocabulary
+
 
 
     def load_model_configs(self):
@@ -51,15 +57,16 @@ class scGPTModel():
 
 
     def init_model(self):
+        set_seed(self.model_configs.get("seed", 42))
+
         # Initialize model
         self.model = TransformerModel(
-            seed=42,
-            ntoken=len(self.vocab),
-            d_model=self.model_configs["embsize"],
-            nhead=self.model_configs["nheads"],
-            d_hid=self.model_configs["d_hid"],
+            ntoken=self.ntokens,
+            d_model=self.model_configs["layer_size"],
+            nhead=self.model_configs["nhead"],
+            d_hid=self.model_configs.get("d_hid", self.model_configs.get("layer_size")),
             nlayers=self.model_configs["nlayers"],
-            nlayers_cls=self.model_configs["n_layers_cls"],
+            nlayers_cls=self.model_configs.get("n_layers_cls", 3),
             n_cls=self.model_configs.get("n_cls", 1),
             vocab=self.vocab,
             dropout=self.model_configs["dropout"],
@@ -74,10 +81,28 @@ class scGPTModel():
             fast_transformer_backend="flash",
             pre_norm=self.model_configs.get("pre_norm",False),
         )
-        # Load pretrained weights
-        load_pretrained(self.model, torch.load(self.model_file, map_location=self.device), verbose=False)
+  
+        try:
+            # Load pretrained weights
+            load_pretrained(self.model, torch.load(self.model_file, map_location=self.device), verbose=False)
+        except:
+            model_dict = self.model.state_dict()
+            pretrained_dict = torch.load(self.model_file)
+            pretrained_dict = {
+                k: v
+                for k, v in pretrained_dict.items()
+                if k in model_dict and v.shape == model_dict[k].shape
+            }
+            for k, v in pretrained_dict.items():
+                print(f"Loading params {k} with shape {v.shape}")
+                model_dict.update(pretrained_dict)
+                self.model.load_state_dict(model_dict)   
+
         self.model.to(self.device)
         self.model.eval()
+    
+    def init_gene_embedding(self):
+        self.get_model_gene_embeddings()
 
     def get_model(self):
         return self.model
@@ -110,7 +135,7 @@ class scGPTModel():
     def get_pretrained_genes(self):
         ### Returns genes (tokens) that are already in the vocab file
         if  self.model_gene_ids is None:
-            self.model_gene_ids = np.array(list(self.get_gene2idx.values()))
+            self.model_gene_ids = self.get_model_genes()
         return self.model_gene_ids 
     
     def get_gene2idx(self):
@@ -118,14 +143,20 @@ class scGPTModel():
             self.model_gene_id_token_dict = self.vocab.get_stoi()
         return self.model_gene_id_token_dict
     
+    def get_model_genes(self):
+        return np.array(list(self.get_gene2idx().keys()))
+        
+    def get_model_gene_tokens(self):
+        return np.array(list(self.get_gene2idx().values()))
+    
     def get_model_gene_embeddings(self):
         if self.model_gene_embeddings is None:
-            self.model_gene_embeddings = self.model.encoder(torch.tensor(self.model_gene_ids, dtype=torch.long).to(self.device)).detach().cpu().numpy()
+            self.model_gene_embeddings = self.model.encoder(torch.tensor(self.get_model_gene_tokens(), dtype=torch.long).to(self.device)).detach().cpu().numpy()
         return self.model_gene_embeddings
     
-    @staticmethod
-    def _get_gene_embedding_vectors(embedding_mappings:dict):
-        return GeneEmbedding(embedding_mappings)
+    def _get_gene_embedding_vectors(self, embedding_mappings:dict):
+        self.model_GeneEmbedding = GeneEmbedding(embedding_mappings)
+        return self.model_GeneEmbedding
     
     @staticmethod
     def _get_gdata(embed:GeneEmbedding, louvain_res=1):
@@ -149,11 +180,13 @@ class scGPTModel():
         # Compute all pairwise cosine similarities at once
         return cosine_similarity(gene_embed_matrix)
     
-    def get_gene_order_index(self):
-        return {gene : order_idx for order_idx, gene in enumerate(self.get_gene2idx())}
+    def get_gene_order_dict(self):
+        if self.gene_order_dict is None:
+            self.gene_order_dict = {gene : order_idx for order_idx, gene in enumerate(self.get_gene2idx())}
+        return self.gene_order_dict
     
     def get_gene_embedding(self, gene):
-        return self.model_gene_embeddings[self.get_gene_order_index()[gene]]
+        return self.model_gene_embeddings[self.get_gene_order_dict()[gene]]
     
     def get_gene_embedding_matrix(self, genes:list):
         # Get embeddings matrix (genes as rows)
