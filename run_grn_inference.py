@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-from utils import load_model
-
 
 def execute(args):
     import anndata
     from lib.grn_process import GRNProcessor
     import os
+    from utils import load_model
     import json
     
     print("Loading scGPT model...")

@@ -1,12 +1,12 @@
 import json
 import torch
-from scgpt.tokenizer import GeneVocab
+from scgpt.tokenizer import GeneVocab, tokenize_and_pad_batch
 from scgpt.model import TransformerModel
 from scgpt.utils import load_pretrained, set_seed
 import numpy as np
 import scgpt
 from scgpt.tasks import GeneEmbedding
-from typing import Dict, Mapping, Optional, Tuple, Any, Union
+from typing import Dict, Mapping, Optional, Tuple, Any, Union, Iterable
 from einops import rearrange
 
 
@@ -86,6 +86,27 @@ class scGPTModel():
         # Load model configs
         with open(self.model_config_file, "r") as f:
             self.model_configs = json.load(f)
+        
+        self.embed_size=self.model_configs.get("embsize", self.model_configs.get('layer_size')) ##d_model parameter
+        self.nheads=self.model_configs.get("nheads", self.model_configs.get("nhead"))
+        self.d_hid=self.model_configs["d_hid"]
+        self.nlayers=self.model_configs["nlayers"]
+        self.nlayers_cls=self.model_configs["n_layers_cls"]
+        self.n_cls=self.model_configs.get("n_cls", 1)
+        self.dropout=self.model_configs.get("dropout", self.dropout)
+        self.pad_token=self.model_configs.get("pad_token", self.pad_token)
+        self.pad_value=self.model_configs.get("pad_value", self.pad_value)
+        self.do_mvc=self.model_configs.get("do_mvc", self.do_mvc)
+        self.do_dab=self.model_configs.get("do_dab",self.do_dab)
+        self.use_batch_labels=self.model_configs.get("use_batch_labels",self.use_batch_labels)
+        self.domain_spec_batchnorm=self.model_configs.get("domain_spec_batchnorm",self.domain_spec_batchnorm)
+        self.explicit_zero_prob=self.model_configs.get('explicit_zero_prob', self.explicit_zero_prob)
+        self.use_fast_transformer=self.use_fast_transformer
+        self.fast_transformer_backend="flash"
+        self.pre_norm=self.model_configs.get("pre_norm",False)
+    
+        if not isinstance(self.pad_token, str):
+            raise ValueError(f"pad token was not initiated in str type!\n {self.pad_token}")
 
 
     def init_model(self):
@@ -230,10 +251,38 @@ class scGPTModel():
         # Get embeddings matrix (genes as rows)
         return np.array([self.get_gene_embedding(gene) for gene in genes])
 
-    def get_attention_scores(self):
+    def process_attention_scores(self,gene_ids:list, counts_matrix, condition_batch_ids)->Dict[str,np.array]:
+        tokenizd_genes_values = self.tokenize_gene_ids(gene_ids, counts_matrix)
+        
+        tokenized_gene_ids, tokenized_values = tokenizd_genes_values["genes"], tokenizd_genes_values["values"]
+        src_key_padding_mask = tokenized_gene_ids.eq(self.vocab[self.pad_token])
+        condition_ids = condition_batch_ids ## np.array(adata.obs["batch_sample"].tolist())
+        self.get_attention_score(
+            tokenized_gene_ids,
+            tokenized_values,
+            src_key_padding_mask,
+            condition_ids,
+
+        )
+
+    def tokenize_gene_ids(self, gene_ids, counts):
+        return tokenize_and_pad_batch(counts,
+                                      gene_ids,
+                                      max_len=len(gene_ids)+1,
+                                      vocab=self.vocab,
+                                      pad_token=self.pad_token,
+                                      pad_value=self.pad_value,
+                                      append_cls=True,  # append <cls> token at the beginning
+                                      include_zero_gene=True,
+                                    )
+
+
+    def get_attention_scores(self, all_gene_ids, all_values, src_key_padding_mask, condition_ids):
         ### this one requires heavy GPU memory ~15-20GB
         self.model.eval()
         batch_normaliser = self.get_batch_normaliser()
+
+        dict_sum_condition = {}
 
         with torch.no_grad(), torch.cuda.amp.autocast(enabled=True):
             M = all_gene_ids.size(1)
@@ -288,6 +337,8 @@ class scGPTModel():
                         dict_sum_condition[c] = np.zeros((M, M), dtype=np.float32)
                     else:
                         dict_sum_condition[c] += outputs[index, :, :]
+            
+        return dict_sum_condition
     
     def get_batch_normaliser(self):
         #### Batch normalisation 

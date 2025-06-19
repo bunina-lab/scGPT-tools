@@ -1,4 +1,4 @@
-from scgpt_model import scGPTModel
+from lib.scgpt_model import scGPTModel
 import numpy as np
 import pandas as pd
 from sklearn.neighbors import NearestNeighbors

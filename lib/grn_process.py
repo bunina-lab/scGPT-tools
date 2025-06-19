@@ -257,3 +257,38 @@ class GRNProcessor:
                 tmp_adata.obs[score_name] = 0.0
 
         return tmp_adata
+    
+    def get_topk_most_influenced_genes(self, topk, setting, gene_of_interest:str,gene_vocab_idx:np.array, dict_sum_condition_mean):
+        """
+        This function is for the 
+        """
+        ### TODO: generalise the function
+        attn_top_gene_dict = {}
+        attn_top_scores_dict = {}
+        for batch_name in groups.keys():
+            if batch_name  == "mutant_mono":
+                gene_of_interest_idx = np.where(gene_vocab_idx==self.vocab([gene_of_interest])[0])[0][0]
+                control = dict_sum_condition_mean['control_mono'][:, gene_of_interest_idx]
+                exp = dict_sum_condition_mean[batch_name][:, gene_of_interest_idx]
+            elif batch_name  == "mutant_cc":
+                gene_of_interest_idx = np.where(gene_vocab_idx==self.vocab([gene_of_interest])[0])[0][0]
+                control = dict_sum_condition_mean['control_cc'][:, gene_of_interest_idx]
+                exp = dict_sum_condition_mean[batch_name][:, gene_of_interest_idx]
+                
+            else: ## experiment
+                continue
+
+            # Change this line to exp, control, exp-control for three different settings
+            if setting == 'difference':
+                a = exp-control
+            elif setting == 'control':
+                a = control
+            elif setting == 'experiment':
+                a = exp
+            diff_idx = np.argpartition(a, -topk)[-topk:]
+            scores = (a)[diff_idx]
+            attn_top_genes = self.vocab.lookup_tokens(gene_vocab_idx[diff_idx]) + [gene_of_interest]
+            attn_top_gene_dict[batch_name] = list(attn_top_genes)
+            attn_top_scores_dict[batch_name] = list(scores)
+
+        return attn_top_gene_dict, attn_top_scores_dict
