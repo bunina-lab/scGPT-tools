@@ -8,14 +8,26 @@ def execute(args):
     import json
     import scanpy as sc
 
-
-    print("Loading scGPT model...")
-    model = load_model(
-        model_path=args.model_path,
-        model_args_path=args.model_args,
-        model_vocab_path=args.model_vocab
-    )
+    if not os.path.exists(args.output_dir):
+        print(f"Path \n {args.output_dir}\n does not exists. Creating new folder")
+        os.makedirs(args.output_dir)
     
+    # Check if reference file exists
+    if not os.path.isfile(args.reference_h5ad):
+        raise FileNotFoundError(f"Reference h5ad file not found: {args.reference_h5ad}")
+
+    # Check if model files exist
+    if not os.path.isfile(args.model_path):
+        raise FileNotFoundError(f"Model file not found: {args.model_path}")
+    if not os.path.isfile(args.model_args):
+        raise FileNotFoundError(f"Model args file not found: {args.model_args}")
+    if not os.path.isfile(args.model_vocab):
+        raise FileNotFoundError(f"Model vocab file not found: {args.model_vocab}")
+
+    # Check if all query files exist
+    for adata_path in args.query_h5ad:
+        if not os.path.isfile(adata_path):
+            raise FileNotFoundError(f"Query h5ad file not found: {adata_path}")
 
      # Load Reference data
     print("Loading reference data...")
@@ -26,6 +38,13 @@ def execute(args):
     if args.sampling_frac:
         ref_adata = sc.pp.sample(ref_adata, fraction=args.sampling_frac, copy=True)
 
+    from utils import load_model
+    print("Loading scGPT model...")
+    model = load_model(
+        model_path=args.model_path,
+        model_args_path=args.model_args,
+        model_vocab_path=args.model_vocab
+    )
 
     # Initialize annotator
     annotator = AnnotateCells(
