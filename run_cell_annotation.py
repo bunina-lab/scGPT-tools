@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-from utils import load_model
 
 def execute(args):
     import anndata
@@ -19,9 +18,9 @@ def execute(args):
     # Check if model files exist
     if not os.path.isfile(args.model_path):
         raise FileNotFoundError(f"Model file not found: {args.model_path}")
-    if not os.path.isfile(args.model_args):
+    if args.model_args is not None and not os.path.isfile(args.model_args):
         raise FileNotFoundError(f"Model args file not found: {args.model_args}")
-    if not os.path.isfile(args.model_vocab):
+    if args.model_vocab is not None and not os.path.isfile(args.model_vocab):
         raise FileNotFoundError(f"Model vocab file not found: {args.model_vocab}")
 
     # Check if all query files exist
@@ -34,9 +33,13 @@ def execute(args):
     ref_adata = anndata.read_h5ad(args.reference_h5ad)
     if args.ref_cell_column not in ref_adata.obs.columns:
         raise KeyError(f"Reference cell key not found in columns:\n{args.ref_cell_column}")
+    if args.ref_gene_column not in ref_adata.var.columns:
+        raise KeyError(f"Reference gene key not found in columns:\n{args.ref_gene_column}")
     
     if args.sampling_frac:
         ref_adata = sc.pp.sample(ref_adata, fraction=args.sampling_frac, copy=True)
+
+    save_ref = args.embedding_layer not in ref_adata.obsm.keys()
 
     from utils import load_model
     print("Loading scGPT model...")
@@ -63,6 +66,12 @@ def execute(args):
         annotated_adata = annotator.annotate_cells(anndata.read_h5ad(adata_path), args.q_gene_column)
         annotated_adata.write_h5ad(os.path.join(args.output_dir, f"cell_annotated_{os.path.basename(adata_path)}"))
     
+    ##Saves the reference data with the embedded layer automatically for future use
+    if save_ref:
+        print(f"Saving reference data with embedded layer {args.embedding_layer}.\nNext time use this file to avoid re-embedding the reference data.")
+        if args.sampling_frac:
+            print(f"Remember, this referenfe is downsampled to {args.sampling_frac} of the original data.")
+        ref_adata.write_h5ad(os.path.join(args.output_dir, "ref_adata_embedded.h5ad"))
     # Save parameters
     with open(os.path.join(args.output_dir, "parameters.json"), "w") as f:
         json.dump(vars(args), f)
