@@ -43,6 +43,7 @@ class GRNProcessor:
                 save=os.path.join(output_dir, f"{cluster_id}_GRN.png"),
                 bold_thresh=self.minimum_similarity_threshold
                 )
+            similarity_df.to_csv(os.path.join(output_dir, f"{cluster_id}_GRN.csv"), index=False)
 
     def get_common_features(self, adata, gene_col="index"):
         adata_genes = set(adata.var.index) if gene_col == "index" else set(adata.var[gene_col])
@@ -119,7 +120,7 @@ class GRNProcessor:
 
         for leiden_cluster_num, gene_prog in gene_clusters.items():
             df_GP_sim = self.get_similarity_df(gene_prog, self.gene_embed_mapping)
-            if df_GP_sim["Similarity"].max() > minimum_similarity:
+            if abs(df_GP_sim["Similarity"].max()) > minimum_similarity:
                 high_sims[leiden_cluster_num] = df_GP_sim
                 #print(f'Cluster:{leiden_cluster_num}\nMax value{df_GP_sim["Similarity"].max()}')
 
