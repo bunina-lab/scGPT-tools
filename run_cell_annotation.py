@@ -33,7 +33,7 @@ def execute(args):
     ref_adata = anndata.read_h5ad(args.reference_h5ad)
     if args.ref_cell_column not in ref_adata.obs.columns:
         raise KeyError(f"Reference cell key not found in columns:\n{args.ref_cell_column}")
-    if args.ref_gene_column not in ref_adata.var.columns:
+    if args.ref_gene_column != "index" and  args.ref_gene_column not in ref_adata.var.columns:
         raise KeyError(f"Reference gene key not found in columns:\n{args.ref_gene_column}")
     
     if args.sampling_frac:
