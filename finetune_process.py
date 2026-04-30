@@ -385,11 +385,11 @@ def main():
 
     # --- Pretrained config ---
     pretrain_cfg = load_pretrained_config(model_dir)
-    embsize = pretrain_cfg.get("embsize", 512)
-    nhead   = pretrain_cfg.get("nheads", 8)
-    d_hid   = pretrain_cfg.get("d_hid", 512)
-    nlayers = pretrain_cfg.get("nlayers", 12)
-    dropout = pretrain_cfg.get("dropout", 0.0)
+    embsize = pretrain_cfg.setdefault("embsize", 512)
+    nhead = pretrain_cfg.setdefault("nheads", 8)
+    d_hid = pretrain_cfg.setdefault("d_hid", 512)
+    nlayers = pretrain_cfg.setdefault("nlayers", 12)
+    dropout = pretrain_cfg.setdefault("dropout", 0.0)
     print(f"[model] embsize={embsize}  nhead={nhead}  nlayers={nlayers}")
 
     # --- Data ---
