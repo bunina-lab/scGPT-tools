@@ -50,8 +50,6 @@ def parse_args():
     # Data
     p.add_argument("--batch_key",     default="batch",
                    help="adata.obs column for batch/sample identity")
-    p.add_argument("--celltype_key",  default=None,
-                   help="adata.obs column for cell type labels (optional, logging only)")
     p.add_argument("--n_hvg",         type=int, default=3000,
                    help="Number of highly variable genes (0 = use all)")
     p.add_argument("--max_seq_len",   type=int, default=1201,
