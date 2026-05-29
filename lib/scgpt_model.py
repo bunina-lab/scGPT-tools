@@ -62,8 +62,8 @@ class scGPTModel():
         # Initialize model
         self.model = TransformerModel(
             ntoken=self.ntokens,
-            d_model=self.model_configs["layer_size"],
-            nhead=self.model_configs["nhead"],
+            d_model=self.model_configs.get("d_hid", self.model_configs.get("layer_size")),
+            nhead=self.model_configs.get("nhead", self.model_configs["nheads"]),
             d_hid=self.model_configs.get("d_hid", self.model_configs.get("layer_size")),
             nlayers=self.model_configs["nlayers"],
             nlayers_cls=self.model_configs.get("n_layers_cls", 3),

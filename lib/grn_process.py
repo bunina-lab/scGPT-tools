@@ -12,7 +12,7 @@ import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 
 class GRNProcessor:
-    def __init__(self, model:scGPTModel, cluster_resolution=10.0, minimum_feature_count=9, minimum_similarity_threshold=0.4) -> None:
+    def __init__(self, model:scGPTModel, cluster_resolution=1.0, minimum_feature_count=9, minimum_similarity_threshold=0.4) -> None:
         
         self.model = model
         self.minimum_similarity_threshold =minimum_similarity_threshold
@@ -21,28 +21,101 @@ class GRNProcessor:
 
         self.gene_embed_mapping = None
 
-    def process(self, adata:AnnData, gene_column, celltype_column, output_dir):
+    def process(self, adata:AnnData, gene_column, celltype_column, output_dir, plot=False):
         ## Get clusters on the genes/features that are common
-        common_features = self.get_common_features(adata, gene_col=gene_column)
-        clusters = self.process_gene_clusters(common_features, louvain_res=self.cluster_resolution, minimum_feature_count=self.minimum_feature_count)
-        similarity_clusters = self.get_high_similarity_clusters(clusters, self.minimum_similarity_threshold)
-        if len(similarity_clusters) == 0:
-            raise ValueError("No interaction passed the similarity threshold. Try lowering it")
+        #common_features = self.get_common_features(adata, gene_col=gene_column)
+        #clusters = self.process_gene_clusters(common_features, louvain_res=self.cluster_resolution, minimum_feature_count=self.minimum_feature_count)
+        #similarity_clusters = self.get_high_similarity_clusters(clusters, self.minimum_similarity_threshold)
+        #if len(similarity_clusters) == 0:
+        #    raise ValueError("No interaction passed the similarity threshold. Try lowering it")
         
         ##NEED to change the index here
-        high_mgs = dict(filter(lambda i:i[0] in similarity_clusters.keys(), clusters.items()))
-        self.process_metagenes_heatmap(
-            metagenes=high_mgs,
-            adata=adata,
-            ct_column=celltype_column,
-            save=os.path.join(output_dir,"High_Sim_Heatmap.png")
-        )
-        for cluster_id, similarity_df in similarity_clusters.items():
-            self.process_network_graph(
-                similarity_df=similarity_df,
-                save=os.path.join(output_dir, f"{cluster_id}_GRN.png"),
-                bold_thresh=self.minimum_similarity_threshold
-                )
+        #high_mgs = dict(filter(lambda i:i[0] in similarity_clusters.keys(), clusters.items()))
+        
+        #if not plot:
+        #    return None
+
+        # Calculate and write celltype-specific GRNs as TSVs
+
+        # Group cells by cell type
+        celltypes = adata.obs[celltype_column].unique()
+        celltype_grns = {}
+        human_tf_set = self.get_human_tf_set()
+
+        for ct in celltypes:
+            # Subset adata to this cell type
+            adata_ct = adata[adata.obs[celltype_column] == ct]
+
+            # Get common features for this subset (same as overall common_features, but defensively re-filter)
+            ct_common_features = self.get_common_features(adata_ct, gene_col=gene_column)
+
+            # Get gene embeddings for these features
+            ct_gene_embed_mapping = self.get_gene_embeddings(ct_common_features)
+
+            # Cluster genes
+            ct_clusters = self.process_gene_clusters(
+                ct_common_features,
+                louvain_res=self.cluster_resolution,
+                minimum_feature_count=self.minimum_feature_count
+            )
+            # Similarity filtering
+            ct_similarity_clusters = self.get_high_similarity_clusters(ct_clusters, self.minimum_similarity_threshold)
+            if not ct_similarity_clusters:
+                print(f"[warn] No high similarity GRNs for celltype {ct}. Skipping.")
+                continue
+
+            # For each cluster, store the DataFrame representing the GRN
+            ct_grn_dict = {}
+            ct_similarity_df = pd.DataFrame()
+            for cluster_id, sim_df in ct_similarity_clusters.items():
+                ct_grn_dict[cluster_id] = sim_df
+                ct_similarity_df = pd.concat([ct_similarity_df, sim_df])
+                # Save the similarity matrix as TSV
+                
+
+                # Optionally, save the graph plot too
+                if plot:
+                    plot_path = os.path.join(output_dir, f"{ct}_GRN_{cluster_id}.png")
+                    self.process_network_graph(
+                        similarity_df=sim_df,
+                        save=plot_path,
+                        bold_thresh=self.minimum_similarity_threshold
+                    )
+            # Save the concatenated/final GRN as TSV
+            sim_tsv_path = os.path.join(output_dir, f"{ct}_similarity.tsv")
+            ct_similarity_df.to_csv(sim_tsv_path, sep="\t", index=False)
+
+            ct_grn_df = self.get_grn_df(ct_similarity_df, tf_set=human_tf_set)
+            grn_tsv_path = os.path.join(output_dir, f"{ct}_grn.tsv")
+            ct_grn_df.to_csv(grn_tsv_path, sep="\t", index=False)
+
+            ct_grn_dict['all'] = ct_similarity_df
+            celltype_grns[ct] = ct_grn_dict
+
+        # Optionally save a summary file listing celltype to GRN clusters
+        summary_path = os.path.join(output_dir, "celltype_GRNs_summary.txt")
+        with open(summary_path, "w") as f:
+            for ct, clusters in celltype_grns.items():
+                f.write(f"Celltype: {ct}\n")
+                for cluster_id in clusters:
+                    f.write(f"  GRN Cluster: {cluster_id}, Output: {ct}_GRN_{cluster_id}.tsv\n")
+                f.write("\n")
+        
+        if not plot:
+            return None
+        
+        #self.process_metagenes_heatmap(
+        #    metagenes=high_mgs,
+        #    adata=adata,
+        #    ct_column=celltype_column,
+        #    save=os.path.join(output_dir,"High_Sim_Heatmap.png")
+        #)
+        #for cluster_id, similarity_df in similarity_clusters.items():
+        #    self.process_network_graph(
+        #        similarity_df=similarity_df,
+        #        save=os.path.join(output_dir, f"{cluster_id}_GRN.png"),
+        #        bold_thresh=self.minimum_similarity_threshold
+        #        )
 
     def get_common_features(self, adata, gene_col="index"):
         adata_genes = set(adata.var.index) if gene_col == "index" else set(adata.var[gene_col])
@@ -72,6 +145,36 @@ class GRNProcessor:
     
     def get_embedded_gene_clusters(self, gene_embed_mapping:dict, louvain_res=20)->dict:
         return self.model.get_gene_clusters(gene_embed_mapping, louvain_res)
+    
+    def get_grn_df(self, similarity_df:pd.DataFrame, tf_set:set)->pd.DataFrame:
+        sim_df = similarity_df.copy() 
+        sim_df['is_Gene_TF'] = sim_df["Gene"].isin(tf_set)
+        sim_df['is_Gene1_TF'] = sim_df["Gene1"].isin(tf_set)
+        return self.to_source_target_fast(sim_df)
+
+    def get_human_tf_set(self)->set:
+        ## TODO: this is quick and dirty, temporary solution to generate GRN
+        tf_set = set()
+        with open("/fast/AG_Bunina/annotations/GRCh38_2025/HumanTF_list.txt", "r") as fh:
+            tf_set = set([tf.replace('\n', '').strip() for tf in fh])
+        return tf_set
+    
+    @staticmethod
+    def to_source_target_fast(df:pd.DataFrame)->pd.DataFrame:
+        ## TODO: this is quick and dirty, temporary solution to generate GRN
+        both  = df[ df['is_Gene_TF'] &  df['is_Gene1_TF']]
+        only0 = df[ df['is_Gene_TF'] & ~df['is_Gene1_TF']]
+        only1 = df[~df['is_Gene_TF'] &  df['is_Gene1_TF']]
+
+        frames = [
+            # Gene → Gene1  (Gene is TF, or both)
+            pd.DataFrame({'source': both['Gene'],  'target': both['Gene1'], 'score': both['Similarity']}),
+            pd.DataFrame({'source': both['Gene1'], 'target': both['Gene'],  'score': both['Similarity']}),
+            pd.DataFrame({'source': only0['Gene'], 'target': only0['Gene1'],'score': only0['Similarity']}),
+            pd.DataFrame({'source': only1['Gene1'],'target': only1['Gene'], 'score': only1['Similarity']}),
+        ]
+
+        return pd.concat(frames, ignore_index=True)
 
     @staticmethod
     def filter_gene_clusters(gene_clusters, min_feature_count=9):
