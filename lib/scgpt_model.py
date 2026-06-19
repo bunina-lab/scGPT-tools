@@ -277,7 +277,7 @@ class scGPTModel():
                                     )
 
 
-    def get_attention_scores(self, all_gene_ids, all_values, src_key_padding_mask, condition_ids):
+    def get_attention_scores(self, all_gene_ids, all_values, src_key_padding_mask, condition_ids:np.array, batch_size=16, query_ids:np.array=None):
         ### this one requires heavy GPU memory ~15-20GB
         self.model.eval()
         batch_normaliser = self.get_batch_normaliser()
@@ -286,27 +286,25 @@ class scGPTModel():
 
         with torch.no_grad(), torch.cuda.amp.autocast(enabled=True):
             M = all_gene_ids.size(1)
-            N = all_gene_ids.size(0)
+            N = all_gene_ids.size(0) ## Number of cells
             device = next(self.model.parameters()).device
             for i in tqdm(range(0, N, batch_size)):
-                batch_size = all_gene_ids[i : i + batch_size].size(0)
-                outputs = np.zeros((batch_size, M, M), dtype=np.float32)
+                cur_bs = min(batch_size, N - i)
                 # Replicate the operations in model forward pass
-                src_embs = self.model.encoder(torch.tensor(all_gene_ids[i : i + batch_size], dtype=torch.long).to(device))
-                val_embs = self.model.value_encoder(torch.tensor(all_values[i : i + batch_size], dtype=torch.float).to(device))
+                src_embs = self.model.encoder(torch.tensor(all_gene_ids[i : i + cur_bs], dtype=torch.long).to(device))
+                val_embs = self.model.value_encoder(torch.tensor(all_values[i : i + cur_bs], dtype=torch.float).to(device))
                 total_embs = src_embs + val_embs
 
                 total_embs = batch_normaliser(total_embs.permute(0, 2, 1)).permute(0, 2, 1)
                 # Send total_embs to attention layers for attention operations
-                # Retrieve the output from second to last layer
-                for layer in self.model.transformer_encoder.layers[:-2]:
-                    total_embs = layer(total_embs, src_key_padding_mask=src_key_padding_mask[i : i + batch_size].to(device))
+                for layer in self.model.transformer_encoder.layers[:-1]:
+                    total_embs = layer(total_embs, src_key_padding_mask=src_key_padding_mask[i : i + cur_bs].to(device))
                 # Send total_embs to the last layer in flash-attn
                 # https://github.com/HazyResearch/flash-attention/blob/1b18f1b7a133c20904c096b8b222a0916e1b3d37/flash_attn/flash_attention.py#L90
                 qkv = self.model.transformer_encoder.layers[-1].self_attn.Wqkv(total_embs)
                 # Retrieve q, k, and v from flast-attn wrapper
                 qkv = rearrange(qkv, 'b s (three h d) -> b s three h d', three=3, h=self.nheads)
-                q = qkv[:, :, 0, :, :]
+                q = qkv[:, :, 0, :, :] if query_ids is None else qkv[:, query_ids, 0, :, :]
                 k = qkv[:, :, 1, :, :]
                 v = qkv[:, :, 2, :, :]
                 # https://towardsdatascience.com/illustrated-self-attention-2d627e33b20a
@@ -314,36 +312,50 @@ class scGPTModel():
                 # k = [batch, gene, n_heads, n_hid]
                 # attn_scores = [batch, n_heads, gene, gene]
                 attn_scores = q.permute(0, 2, 1, 3) @ k.permute(0, 2, 3, 1)
+
+                n_q = q.size(1)   # M when query_ids is None, len(query_ids) otherwise
+
                 # Rank normalization by row
+                #attn_scores = attn_scores.reshape((-1, M))
+                #order = torch.argsort(attn_scores, dim=1)
+                #rank = torch.argsort(order, dim=1)
+                #attn_scores = rank.reshape((-1, self.nheads, M, M))/M
+
+                # Row normalisation
                 attn_scores = attn_scores.reshape((-1, M))
-                order = torch.argsort(attn_scores, dim=1)
-                rank = torch.argsort(order, dim=1)
-                attn_scores = rank.reshape((-1, self.nheads, M, M))/M
+                rank = torch.argsort(torch.argsort(attn_scores, dim=1), dim=1)
+                attn_scores = rank.reshape(-1, self.nheads, n_q, M).float() / M
+
                 # Rank normalization by column
-                attn_scores = attn_scores.permute(0, 1, 3, 2).reshape((-1, M))
-                order = torch.argsort(attn_scores, dim=1)
-                rank = torch.argsort(order, dim=1)
-                attn_scores = (rank.reshape((-1, self.nheads, M, M))/M).permute(0, 1, 3, 2)
+                #attn_scores = attn_scores.permute(0, 1, 3, 2).reshape((-1, M))
+                #order = torch.argsort(attn_scores, dim=1)
+                #rank = torch.argsort(order, dim=1)
+                #attn_scores = (rank.reshape((-1, self.nheads, M, M))/M).permute(0, 1, 3, 2)
+
+                # Column normalisation
+                attn_scores = attn_scores.permute(0, 1, 3, 2).reshape(-1, n_q)
+                rank = torch.argsort(torch.argsort(attn_scores, dim=1), dim=1)
+                attn_scores = (rank.reshape(-1, self.nheads, M, n_q).float() / M).permute(0, 1, 3, 2)
 
                 # Average 8 attention heads
                 attn_scores = attn_scores.mean(1)
                 
                 outputs = attn_scores.detach().cpu().numpy()
                 
-                for index in range(batch_size):
+                for index in range(cur_bs):
                     # Keep track of sum per condition
-                    c = condition_ids[i : i + batch_size][index]
+                    c = condition_ids[i : i + cur_bs][index]
                     if c not in dict_sum_condition:
                         dict_sum_condition[c] = np.zeros((M, M), dtype=np.float32)
-                    else:
-                        dict_sum_condition[c] += outputs[index, :, :]
+                    
+                    dict_sum_condition[c] += outputs[index, :, :]
             
         return dict_sum_condition
     
     def get_batch_normaliser(self):
         #### Batch normalisation 
         ## https://github.com/bowang-lab/scGPT/blob/0cd3c73779e93e999789d52b4412e6c23baaa02b/scgpt/model/model.py
-        if self.domain_spec_batchnorm is True or self.domain_spec_batchnorm == "dsbn":
+        if self.domain_spec_batchnorm in ["dsbn", "do_affine", True]:
             use_affine = True if self.domain_spec_batchnorm == "do_affine" else False
             print(f"Use domain specific batchnorm with affine={use_affine}")
             normaliser = scgpt.model.dsbn.DomainSpecificBatchNorm1d(
@@ -352,6 +364,8 @@ class scGPTModel():
         elif self.domain_spec_batchnorm == "batchnorm":
             print("Using simple batchnorm instead of domain specific batchnorm")
             normaliser = torch.nn.BatchNorm1d(self.embed_size, eps=6.1e-5)
+        elif self.domain_spec_batchnorm is False:
+            normaliser = torch.nn.Identity()
         else:
             raise ValueError(f"Unrecognized domain_spec_batchnorm was called as\n {self.domain_spec_batchnorm}")
         

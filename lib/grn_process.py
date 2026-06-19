@@ -12,12 +12,13 @@ import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 
 class GRNProcessor:
-    def __init__(self, model:scGPTModel, cluster_resolution=10.0, minimum_feature_count=9, minimum_similarity_threshold=0.4) -> None:
+    def __init__(self, model:scGPTModel, tf_names, cluster_resolution=10.0, minimum_feature_count=9, minimum_similarity_threshold=0.4) -> None:
         
         self.model = model
         self.minimum_similarity_threshold =minimum_similarity_threshold
         self.cluster_resolution = cluster_resolution
         self.minimum_feature_count = minimum_feature_count
+        self.tf_names = tf_names
 
         self.gene_embed_mapping = None
 
