@@ -28,7 +28,7 @@ def execute(args):
     # Process and annotate cells
     print("Infering GRNs...")
     for adata_path in args.query_h5ad:
-        out_dir_path = os.path.join(args.output_dir, os.path.basename(adata_path).split(".")[0]) 
+        out_dir_path = os.path.join(args.output_dir, os.path.basename(adata_path).split(".")[0].replace(" ", "_").strip()) 
         os.makedirs(out_dir_path, exist_ok=True)
         annotator.process(
             adata=anndata.read_h5ad(adata_path), 
