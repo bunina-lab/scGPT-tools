@@ -8,6 +8,7 @@ import scgpt
 from scgpt.tasks import GeneEmbedding
 from typing import Dict, Mapping, Optional, Tuple, Any, Union, Iterable
 from einops import rearrange
+import torch.nn.functional as F
 
 
 class scGPTModel():
@@ -173,7 +174,7 @@ class scGPTModel():
         return self.model_configs
 
     def get_gene_vocab(self, genes:list):
-        return np.array(self.vocab(genes), dtype=int)
+        return np.array(self.vocab(list(genes)), dtype=int)
     
     def get_cell_embeddings(self, adata, gene_col, max_length=1200, batch_size=64, use_batch_labels=False): ##use_batch_labels requires adata.obs["batch_id"]
         genes = adata.var.index.tolist() if gene_col == "index" else adata.var[gene_col].tolist() 
@@ -288,6 +289,7 @@ class scGPTModel():
             M = all_gene_ids.size(1)
             N = all_gene_ids.size(0) ## Number of cells
             device = next(self.model.parameters()).device
+            from tqdm import tqdm
             for i in tqdm(range(0, N, batch_size)):
                 cur_bs = min(batch_size, N - i)
                 # Replicate the operations in model forward pass
@@ -301,7 +303,20 @@ class scGPTModel():
                     total_embs = layer(total_embs, src_key_padding_mask=src_key_padding_mask[i : i + cur_bs].to(device))
                 # Send total_embs to the last layer in flash-attn
                 # https://github.com/HazyResearch/flash-attention/blob/1b18f1b7a133c20904c096b8b222a0916e1b3d37/flash_attn/flash_attention.py#L90
-                qkv = self.model.transformer_encoder.layers[-1].self_attn.Wqkv(total_embs)
+                # Handle both fast (FlashMHA) and standard (nn.MultiheadAttention) backends
+                attn_module = self.model.transformer_encoder.layers[-1].self_attn
+                if hasattr(attn_module, '_impl') and hasattr(attn_module._impl, 'Wqkv'):
+                    qkv = attn_module._impl.Wqkv(total_embs)
+                elif hasattr(attn_module, 'Wqkv'):
+                    qkv = attn_module.Wqkv(total_embs)
+                elif hasattr(attn_module, 'in_proj_weight') and attn_module.in_proj_weight is not None:
+                    qkv = F.linear(total_embs, attn_module.in_proj_weight, attn_module.in_proj_bias)
+                else:
+                    raise AttributeError(
+                        f"Cannot extract QKV from {type(attn_module).__name__}. "
+                        f"Attrs: {[a for a in dir(attn_module) if not a.startswith('_')]}"
+                    )
+                #qkv = self.model.transformer_encoder.layers[-1].self_attn.Wqkv(total_embs)
                 # Retrieve q, k, and v from flast-attn wrapper
                 qkv = rearrange(qkv, 'b s (three h d) -> b s three h d', three=3, h=self.nheads)
                 q = qkv[:, :, 0, :, :] if query_ids is None else qkv[:, query_ids, 0, :, :]
@@ -341,14 +356,15 @@ class scGPTModel():
                 attn_scores = attn_scores.mean(1)
                 
                 outputs = attn_scores.detach().cpu().numpy()
+                print(outputs.shape)
                 
                 for index in range(cur_bs):
                     # Keep track of sum per condition
                     c = condition_ids[i : i + cur_bs][index]
                     if c not in dict_sum_condition:
-                        dict_sum_condition[c] = np.zeros((M, M), dtype=np.float32)
-                    
-                    dict_sum_condition[c] += outputs[index, :, :]
+                        dict_sum_condition[c] = outputs[index, :, :] if query_ids is None else outputs[index, :, 1:] ## Handles <cls> token
+                    else:
+                        dict_sum_condition[c] += outputs[index, :, :] if query_ids is None else outputs[index, :, 1:] ## Handles <cls> token
             
         return dict_sum_condition
     

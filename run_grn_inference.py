@@ -15,10 +15,11 @@ def execute(args):
         init_gene_embedding=True
     )
     
+    print(args.use_attention)
 
     ## Read tf list
     with open(args.tf_path, "r") as fh:
-        tf_set = set([tf.replace('\n', '').strip() for tf in fh])
+        tf_set = list(set([tf.replace('\n', '').strip() for tf in fh]))
 
     # Initialize Processor
     if args.use_attention:
@@ -33,7 +34,7 @@ def execute(args):
             model=model,
             minimum_similarity_threshold=args.min_similarity_threshold,
             cluster_resolution=args.cluster_resolution,
-            minimum_feature_count=args.min_feature_count
+            minimum_feature_count=args.min_feature_count,
             tf_names=list(tf_set)
             )
     
@@ -50,7 +51,8 @@ def execute(args):
                 gene_key=args.gene_column,
                 group_key=args.cell_column,
                 output_dir=out_dir_path,
-                threshold_weight=args.min_similarity_threshold
+                threshold_weight=args.min_similarity_threshold,
+                batch_size = args.batch_size
                 
             )
         else:
@@ -86,7 +88,7 @@ if __name__ == "__main__":
                         help='Column name in query anndata containing cell type annotations')
     parser.add_argument('--gene-column', default='index',
                         help='Column name in query data containing gene names')
-    parse_args.add_argument('--layer-key', default='X_binned', help='Anndata Layer key to be used for attention')
+    parser.add_argument('--layer-key', default='X_binned', help='Anndata Layer key to be used for attention')
     
     parser.add_argument('--min-similarity-threshold', type=float, default=0.0, 
                         help='Threshold that filters out the clusters below this value')
@@ -97,6 +99,9 @@ if __name__ == "__main__":
     parser.add_argument('--min-feature-count', type=int, default=9, 
                         help='Minimum number of features that should be included in a GRN')
 
+    parser.add_argument('--use-attention', action='store_true', help='Rather to use attention layer of the transformer')
+
+    parser.add_argument('--batch-size',type=int, default=16, help='Batch size for attention layer')
     
 
     execute(parser.parse_args()) 

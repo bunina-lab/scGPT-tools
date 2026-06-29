@@ -15,7 +15,7 @@ class AttentionGRNProcessor:
         self.model = model ## Initiated scGPTModel instance
         self.tf_names = tf_names if tf_names is not None else []
 
-    def process(self, adata, group_key, gene_key, output_dir: str, layer_key='X_binned', threshold_weight: float = 0.0, ):
+    def process(self, adata, group_key, gene_key, output_dir: str, layer_key='X_binned', threshold_weight: float = 0.0, batch_size=16):
         """
         Main orchestrator pipeline.
         """
@@ -33,7 +33,8 @@ class AttentionGRNProcessor:
             tokenized_data["values"], 
             padding_mask, 
             condition_ids,
-            query_ids
+            query_ids,
+            batch_size
         )
         
         print("3. Processing GRNs and saving to disk...")
@@ -58,6 +59,7 @@ class AttentionGRNProcessor:
         genes = self._get_genes_from_adata(adata, gene_key)
 
         if self.tf_names:
+            ##print(self.tf_names.intersection(genes))
             tf_mask = np.isin(genes, self.tf_names)
             tf_indices = np.where(tf_mask)[0]
             valid_tfs = genes[tf_indices]
@@ -117,13 +119,14 @@ class AttentionGRNProcessor:
 
         return tokenized_data, padding_mask, condition_ids, tf_indices_tokenized, group_mapping, group_counts, genes, valid_tfs
 
-    def query_attention_score(self, tokenized_genes, tokenized_values, padding_mask, condition_ids, query_ids=None):
+    def query_attention_score(self, tokenized_genes, tokenized_values, padding_mask, condition_ids, query_ids=None, batch_size=16):
         return self.model.get_attention_scores(
             all_gene_ids=tokenized_genes,
             all_values=tokenized_values,
             src_key_padding_mask=padding_mask,
             condition_ids=condition_ids,
-            query_ids=query_ids   # integer positions, CLS-corrected
+            query_ids=query_ids,   # integer positions, CLS-corrected
+            batch_size=batch_size
             )
     
     def process_grn(self, tfs, genes, dict_sum_condition: Dict[int, np.array], group_mapping, group_counts, threshold_weight: float = 0.0):
