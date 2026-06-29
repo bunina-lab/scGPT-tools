@@ -1,11 +1,14 @@
 import json
 import torch
-from scgpt.tokenizer import GeneVocab
+from scgpt.tokenizer import GeneVocab, tokenize_and_pad_batch
 from scgpt.model import TransformerModel
 from scgpt.utils import load_pretrained, set_seed
 import numpy as np
 import scgpt
 from scgpt.tasks import GeneEmbedding
+from typing import Dict, Mapping, Optional, Tuple, Any, Union, Iterable
+from einops import rearrange
+import torch.nn.functional as F
 
 
 class scGPTModel():
@@ -19,24 +22,54 @@ class scGPTModel():
         self.use_fast_transformer = use_fast_transformer
 
         self.model = None
-        self.vocab = None
-        self.model_configs = None
 
+        ### Model config parameters ###
+        ### Updated by the load_model_configs() method ###
+        self.model_configs = None
+        self.vocab = None
+        self.embed_size = None
+        self.nheads = None
+        self.d_hid = None
+        self.ntokens = None
+        self.nlayers = None
+        self.nlayers_cls:int = 3
+        self.n_cls:int = 1
+        self.dropout:float=0.5
+        self.pad_token:str = "<pad>"
+        self.pad_value:int = 0
+        self.do_mvc:bool = False
+        self.do_dab:bool = False
+        self.use_batch_labels:bool = False
+        self.num_batch_labels:Optional[int] = None,
+        self.domain_spec_batchnorm: Union[bool, str] = False
+        self.input_emb_style: str = "continuous"
+        self.n_input_bins: Optional[int] = None
+        self.cell_emb_style: str = "cls"
+        self.mvc_decoder_style: str = "inner product"
+        self.ecs_threshold: float = 0.3
+        self.explicit_zero_prob: bool = False
+        self.use_fast_transformer: bool = False
+        self.fast_transformer_backend: str = "flash"
+        self.pre_norm: bool = False
+
+
+        ### Gene Embedding Variables ###
         self.model_GeneEmbedding= None
         self.model_gene_ids = None
         self.model_gene_embeddings = None
         self.model_gene_id_token_dict:dict = None
         self.gene_order_dict = None
 
-        self.ntokens = None
+        
     
     def process_init_model(self):
-        self.load_vocab()
         self.load_model_configs()
+        self.load_vocab()
         self.init_model()
 
-    def load_vocab(self, special_tokens:list=None, pad_token="<pad>"):
+    def load_vocab(self, special_tokens:list=None, pad_token=None):
         if special_tokens is None: 
+            pad_token = pad_token if pad_token is not None else self.pad_token
             special_tokens = [pad_token, "<cls>", "<eoc>"]
         # Load vocabulary
         self.vocab = GeneVocab.from_file(self.vocab_file)
@@ -54,6 +87,27 @@ class scGPTModel():
         # Load model configs
         with open(self.model_config_file, "r") as f:
             self.model_configs = json.load(f)
+        
+        self.embed_size=self.model_configs.get("embsize", self.model_configs.get('layer_size')) ##d_model parameter
+        self.nheads=self.model_configs.get("nheads", self.model_configs.get("nhead"))
+        self.d_hid=self.model_configs["d_hid"]
+        self.nlayers=self.model_configs["nlayers"]
+        self.nlayers_cls=self.model_configs["n_layers_cls"]
+        self.n_cls=self.model_configs.get("n_cls", 1)
+        self.dropout=self.model_configs.get("dropout", self.dropout)
+        self.pad_token=self.model_configs.get("pad_token", self.pad_token)
+        self.pad_value=self.model_configs.get("pad_value", self.pad_value)
+        self.do_mvc=self.model_configs.get("do_mvc", self.do_mvc)
+        self.do_dab=self.model_configs.get("do_dab",self.do_dab)
+        self.use_batch_labels=self.model_configs.get("use_batch_labels",self.use_batch_labels)
+        self.domain_spec_batchnorm=self.model_configs.get("domain_spec_batchnorm",self.domain_spec_batchnorm)
+        self.explicit_zero_prob=self.model_configs.get('explicit_zero_prob', self.explicit_zero_prob)
+        self.use_fast_transformer=self.use_fast_transformer
+        self.fast_transformer_backend="flash"
+        self.pre_norm=self.model_configs.get("pre_norm",False)
+    
+        if not isinstance(self.pad_token, str):
+            raise ValueError(f"pad token was not initiated in str type!\n {self.pad_token}")
 
 
     def init_model(self):
@@ -62,24 +116,30 @@ class scGPTModel():
         # Initialize model
         self.model = TransformerModel(
             ntoken=self.ntokens,
-            d_model=self.model_configs.get("d_hid", self.model_configs.get("layer_size")),
-            nhead=self.model_configs.get("nhead", self.model_configs["nheads"]),
-            d_hid=self.model_configs.get("d_hid", self.model_configs.get("layer_size")),
-            nlayers=self.model_configs["nlayers"],
-            nlayers_cls=self.model_configs.get("n_layers_cls", 3),
-            n_cls=self.model_configs.get("n_cls", 1),
+            d_model=self.embed_size,
+            nhead=self.nheads,
+            d_hid=self.d_hid,
+            nlayers=self.nlayers,
+            nlayers_cls=self.nlayers_cls,
+            n_cls=self.n_cls,
             vocab=self.vocab,
-            dropout=self.model_configs["dropout"],
-            pad_token=self.model_configs["pad_token"],
-            pad_value=self.model_configs["pad_value"],
-            do_mvc=self.model_configs.get("do_mvc", True),
-            do_dab=self.model_configs.get("do_dab",False),
-            use_batch_labels=self.model_configs.get("use_batch_labels",False),
-            domain_spec_batchnorm=self.model_configs.get("domain_spec_batchnorm",False),
-            explicit_zero_prob=self.model_configs.get('explicit_zero_prob', False),
+            dropout=self.dropout,
+            pad_token=self.pad_token,
+            pad_value=self.pad_value,
+            do_mvc=self.do_mvc,
+            do_dab=self.do_dab,
+            use_batch_labels=self.use_batch_labels,
+            num_batch_labels=self.num_batch_labels,
+            domain_spec_batchnorm=self.domain_spec_batchnorm,
+            input_emb_style=self.input_emb_style,
+            n_input_bins=self.n_input_bins,
+            cell_emb_style=self.cell_emb_style,
+            mvc_decoder_style=self.mvc_decoder_style,
+            ecs_threshold=self.ecs_threshold,
+            explicit_zero_prob=self.explicit_zero_prob,
             use_fast_transformer=self.use_fast_transformer,
-            fast_transformer_backend="flash",
-            pre_norm=self.model_configs.get("pre_norm",False),
+            fast_transformer_backend=self.fast_transformer_backend,
+            pre_norm=self.pre_norm,
         )
   
         try:
@@ -114,7 +174,7 @@ class scGPTModel():
         return self.model_configs
 
     def get_gene_vocab(self, genes:list):
-        return np.array(self.vocab(genes), dtype=int)
+        return np.array(self.vocab(list(genes)), dtype=int)
     
     def get_cell_embeddings(self, adata, gene_col, max_length=1200, batch_size=64, use_batch_labels=False): ##use_batch_labels requires adata.obs["batch_id"]
         genes = adata.var.index.tolist() if gene_col == "index" else adata.var[gene_col].tolist() 
@@ -191,3 +251,154 @@ class scGPTModel():
     def get_gene_embedding_matrix(self, genes:list):
         # Get embeddings matrix (genes as rows)
         return np.array([self.get_gene_embedding(gene) for gene in genes])
+
+    def process_attention_scores(self,gene_ids:list, counts_matrix, condition_batch_ids)->Dict[str,np.array]:
+        tokenizd_genes_values = self.tokenize_gene_ids(gene_ids, counts_matrix)
+        
+        tokenized_gene_ids, tokenized_values = tokenizd_genes_values["genes"], tokenizd_genes_values["values"]
+        src_key_padding_mask = tokenized_gene_ids.eq(self.vocab[self.pad_token])
+        condition_ids = condition_batch_ids ## np.array(adata.obs["batch_sample"].tolist())
+        self.get_attention_score(
+            tokenized_gene_ids,
+            tokenized_values,
+            src_key_padding_mask,
+            condition_ids,
+
+        )
+
+    def tokenize_gene_ids(self, gene_ids, counts):
+        return tokenize_and_pad_batch(counts,
+                                      gene_ids,
+                                      max_len=len(gene_ids)+1,
+                                      vocab=self.vocab,
+                                      pad_token=self.pad_token,
+                                      pad_value=self.pad_value,
+                                      append_cls=True,  # append <cls> token at the beginning
+                                      include_zero_gene=True,
+                                    )
+
+
+    def get_attention_scores(self, all_gene_ids, all_values, src_key_padding_mask, condition_ids:np.array, batch_size=16, query_ids:np.array=None):
+        ### this one requires heavy GPU memory ~15-20GB
+        self.model.eval()
+        batch_normaliser = self.get_batch_normaliser()
+
+        dict_sum_condition = {}
+
+        with torch.no_grad(), torch.cuda.amp.autocast(enabled=True):
+            M = all_gene_ids.size(1)
+            N = all_gene_ids.size(0) ## Number of cells
+            device = next(self.model.parameters()).device
+            from tqdm import tqdm
+            for i in tqdm(range(0, N, batch_size)):
+                cur_bs = min(batch_size, N - i)
+                # Replicate the operations in model forward pass
+                src_embs = self.model.encoder(torch.tensor(all_gene_ids[i : i + cur_bs], dtype=torch.long).to(device))
+                val_embs = self.model.value_encoder(torch.tensor(all_values[i : i + cur_bs], dtype=torch.float).to(device))
+                total_embs = src_embs + val_embs
+
+                total_embs = batch_normaliser(total_embs.permute(0, 2, 1)).permute(0, 2, 1)
+                # Send total_embs to attention layers for attention operations
+                for layer in self.model.transformer_encoder.layers[:-1]:
+                    total_embs = layer(total_embs, src_key_padding_mask=src_key_padding_mask[i : i + cur_bs].to(device))
+                # Send total_embs to the last layer in flash-attn
+                # https://github.com/HazyResearch/flash-attention/blob/1b18f1b7a133c20904c096b8b222a0916e1b3d37/flash_attn/flash_attention.py#L90
+                # Handle both fast (FlashMHA) and standard (nn.MultiheadAttention) backends
+                attn_module = self.model.transformer_encoder.layers[-1].self_attn
+                if hasattr(attn_module, '_impl') and hasattr(attn_module._impl, 'Wqkv'):
+                    qkv = attn_module._impl.Wqkv(total_embs)
+                elif hasattr(attn_module, 'Wqkv'):
+                    qkv = attn_module.Wqkv(total_embs)
+                elif hasattr(attn_module, 'in_proj_weight') and attn_module.in_proj_weight is not None:
+                    qkv = F.linear(total_embs, attn_module.in_proj_weight, attn_module.in_proj_bias)
+                else:
+                    raise AttributeError(
+                        f"Cannot extract QKV from {type(attn_module).__name__}. "
+                        f"Attrs: {[a for a in dir(attn_module) if not a.startswith('_')]}"
+                    )
+                #qkv = self.model.transformer_encoder.layers[-1].self_attn.Wqkv(total_embs)
+                # Retrieve q, k, and v from flast-attn wrapper
+                qkv = rearrange(qkv, 'b s (three h d) -> b s three h d', three=3, h=self.nheads)
+                q = qkv[:, :, 0, :, :] if query_ids is None else qkv[:, query_ids, 0, :, :]
+                k = qkv[:, :, 1, :, :]
+                v = qkv[:, :, 2, :, :]
+                # https://towardsdatascience.com/illustrated-self-attention-2d627e33b20a
+                # q = [batch, gene, n_heads, n_hid]
+                # k = [batch, gene, n_heads, n_hid]
+                # attn_scores = [batch, n_heads, gene, gene]
+                attn_scores = q.permute(0, 2, 1, 3) @ k.permute(0, 2, 3, 1)
+
+                n_q = q.size(1)   # M when query_ids is None, len(query_ids) otherwise
+
+                # Rank normalization by row
+                #attn_scores = attn_scores.reshape((-1, M))
+                #order = torch.argsort(attn_scores, dim=1)
+                #rank = torch.argsort(order, dim=1)
+                #attn_scores = rank.reshape((-1, self.nheads, M, M))/M
+
+                # Row normalisation
+                attn_scores = attn_scores.reshape((-1, M))
+                rank = torch.argsort(torch.argsort(attn_scores, dim=1), dim=1)
+                attn_scores = rank.reshape(-1, self.nheads, n_q, M).float() / M
+
+                # Rank normalization by column
+                #attn_scores = attn_scores.permute(0, 1, 3, 2).reshape((-1, M))
+                #order = torch.argsort(attn_scores, dim=1)
+                #rank = torch.argsort(order, dim=1)
+                #attn_scores = (rank.reshape((-1, self.nheads, M, M))/M).permute(0, 1, 3, 2)
+
+                # Column normalisation
+                attn_scores = attn_scores.permute(0, 1, 3, 2).reshape(-1, n_q)
+                rank = torch.argsort(torch.argsort(attn_scores, dim=1), dim=1)
+                attn_scores = (rank.reshape(-1, self.nheads, M, n_q).float() / M).permute(0, 1, 3, 2)
+
+                # Average 8 attention heads
+                attn_scores = attn_scores.mean(1)
+                
+                outputs = attn_scores.detach().cpu().numpy()
+                print(outputs.shape)
+                
+                for index in range(cur_bs):
+                    # Keep track of sum per condition
+                    c = condition_ids[i : i + cur_bs][index]
+                    if c not in dict_sum_condition:
+                        dict_sum_condition[c] = outputs[index, :, :] if query_ids is None else outputs[index, :, 1:] ## Handles <cls> token
+                    else:
+                        dict_sum_condition[c] += outputs[index, :, :] if query_ids is None else outputs[index, :, 1:] ## Handles <cls> token
+            
+        return dict_sum_condition
+    
+    def get_batch_normaliser(self):
+        #### Batch normalisation 
+        ## https://github.com/bowang-lab/scGPT/blob/0cd3c73779e93e999789d52b4412e6c23baaa02b/scgpt/model/model.py
+        if self.domain_spec_batchnorm in ["dsbn", "do_affine", True]:
+            use_affine = True if self.domain_spec_batchnorm == "do_affine" else False
+            print(f"Use domain specific batchnorm with affine={use_affine}")
+            normaliser = scgpt.model.dsbn.DomainSpecificBatchNorm1d(
+                self.embed_size, self.num_batch_labels, eps=6.1e-5, affine=use_affine
+            )
+        elif self.domain_spec_batchnorm == "batchnorm":
+            print("Using simple batchnorm instead of domain specific batchnorm")
+            normaliser = torch.nn.BatchNorm1d(self.embed_size, eps=6.1e-5)
+        elif self.domain_spec_batchnorm is False:
+            normaliser = torch.nn.Identity()
+        else:
+            raise ValueError(f"Unrecognized domain_spec_batchnorm was called as\n {self.domain_spec_batchnorm}")
+        
+        return normaliser.to(self.device)
+    
+    def get_attention_score(self, q, k, M, get_average=False):
+        # attn_scores = [batch, n_heads, gene, gene]
+        attn_scores = q.permute(0, 2, 1, 3) @ k.permute(0, 2, 3, 1)
+        # Rank normalization by row
+        attn_scores = attn_scores.reshape((-1, M))
+        order = torch.argsort(attn_scores, dim=1)
+        rank = torch.argsort(order, dim=1)
+        attn_scores = rank.reshape((-1, self.nheads, M, M))/M
+        # Rank normalization by column
+        attn_scores = attn_scores.permute(0, 1, 3, 2).reshape((-1, M))
+        order = torch.argsort(attn_scores, dim=1)
+        rank = torch.argsort(order, dim=1)
+        attn_scores = (rank.reshape((-1, self.nheads, M, M))/M).permute(0, 1, 3, 2)
+
+        return attn_scores.mean(1).detach().cpu().numpy() if get_average else attn_scores.detach().cpu().numpy()
