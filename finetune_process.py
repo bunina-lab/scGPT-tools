@@ -659,12 +659,26 @@ def main():
 
 
     # Train / val split
-    idx       = np.random.permutation(adata.n_obs)
-    split     = int(0.9 * adata.n_obs)
-    train_idx = idx[:split]
-    val_idx   = idx[split:]
-    print(f"[data] Train: {len(train_idx)} | Val: {len(val_idx)}")
+    if (args.task in ['grn', 'cell_annotation']):
+        from sklearn.model_selection import train_test_split
+        # Ensure celltype_ids is available for stratification
+        labels_for_split = celltype_ids
+        train_idx, val_idx = train_test_split(
+            np.arange(adata.n_obs), 
+            test_size=0.1, 
+            random_state=args.seed,
+            stratify=labels_for_split
+        )
+    else:
+        rng = np.random.default_rng(args.seed)
+        idx       = np.random.permutation(adata.n_obs)
+        split     = int(0.9 * adata.n_obs)
+        train_idx = idx[:split]
+        val_idx   = idx[split:]
 
+    print(f"[data] Train: {len(train_idx)} | Val: {len(val_idx)}")
+    
+    
     print("[data] Tokenising training set ...")
     train_loader = build_dataloader(
         adata[train_idx], vocab, gene2idx, batch_ids[train_idx], args, 
