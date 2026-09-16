@@ -6,7 +6,18 @@ def execute(args):
     import os
     from utils import load_model
     import json
-    
+
+    # Validate perturbation arguments BEFORE loading the model, which takes
+    # minutes; a typo in --perturb-level should not cost a model load.
+    if args.perturb_genes:
+        if not args.use_attention:
+            raise SystemExit(
+                "--perturb-genes requires --use-attention: perturbed GRNs are "
+                "derived from the attention layer."
+            )
+        from lib.insilico_perturb import parse_level
+        parse_level(args.perturb_level)   # raises ValueError on a bad level
+
     print("Loading scGPT model...")
     model = load_model(
         model_path=args.model_path,
