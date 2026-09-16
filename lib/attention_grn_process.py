@@ -1,3 +1,5 @@
+import hashlib
+import json
 import os
 import numpy as np
 import pandas as pd
@@ -46,9 +48,113 @@ class AttentionGRNProcessor:
             group_counts, 
             threshold_weight
             ):
-            self.save_grn(grn, file_name=grn['group_name'][0], output_dir=output_dir)
+            if grn.empty:
+                print(" -> No links passed the threshold; skipping")
+                continue
+            # .iloc, not [0]: after threshold filtering the index label 0 may be gone
+            self.save_grn(grn, file_name=grn['group_name'].iloc[0], output_dir=output_dir)
         
         print(f"Pipeline complete. Files saved to {output_dir}")
+
+    def process_perturbed_grn(self, adata, group_key, gene_key, output_dir: str,
+                              perturb_genes, level: str = "bin:0",
+                              layer_key: str = "X_binned", batch_size: int = 16,
+                              threshold_weight: float = 0.0, compress: bool = False):
+        """Infer the GRN with one gene's expression overwritten in silico.
+
+        Identical to process() except that the tokenized value matrix has one
+        column replaced before the attention pass. The model stays frozen and in
+        eval mode throughout -- no training happens, no gradients are taken.
+
+        Runs over ALL cells and writes one GRN per cell type per gene, in the
+        same schema process() produces, so the output is directly comparable to
+        an ordinary full-run GRN. One forward pass per gene.
+        """
+        from lib.insilico_perturb import (
+            apply_perturbation, gene_token_position, level_slug,
+        )
+
+        print("1. Preprocessing AnnData and Tokenizing...")
+        tokenized_data, padding_mask, condition_ids, query_ids, group_mapping, \
+            group_counts, genes, tfs = self.preprocess_adata(
+                adata=adata, gene_key=gene_key, group_key=group_key,
+                layer_key=layer_key,
+            )
+
+        max_bin = float(tokenized_data["values"].max())
+        missing = [g for g in perturb_genes if g not in set(genes)]
+        if missing:
+            raise KeyError(f"Genes not in the adata var set: {missing}")
+
+        slug = level_slug(level)
+        for n, gene in enumerate(perturb_genes, start=1):
+            position = gene_token_position(genes, gene)
+            values, frac = apply_perturbation(
+                tokenized_data["values"], position, level, max_bin,
+            )
+            print(f"[{n}/{len(perturb_genes)}] {gene} -> {level} "
+                  f"at token {position}: {frac:.1%} of {adata.n_obs} cells changed")
+            if frac == 0.0 and level != "sham":
+                print(f"  WARNING: {gene} is already at the target in every cell, "
+                      f"so this GRN will be identical to the unperturbed one.")
+
+            print("2. Querying Model for Attention Scores...")
+            dict_sum_condition = self.query_attention_score(
+                tokenized_data["genes"], values, padding_mask,
+                condition_ids, query_ids, batch_size,
+            )
+
+            print("3. Processing GRNs and saving to disk...")
+            for grn in self.process_grn(
+                tfs, genes, dict_sum_condition, group_mapping,
+                group_counts, threshold_weight,
+            ):
+                if grn.empty:
+                    print(" -> No links passed the threshold; skipping")
+                    continue
+                group_name = grn['group_name'].iloc[0]
+                grn['perturbed_gene'] = gene
+                grn['perturb_level'] = level
+                file_name = f"{gene}_{slug}_{group_name}"
+                self.save_grn(grn, output_dir=output_dir, file_name=file_name,
+                              compress=compress)
+                self._write_manifest(
+                    output_dir=output_dir, file_name=file_name, gene=gene,
+                    level=level, frac=frac, group_name=group_name,
+                    num_cells=int(grn['num_cells'].iloc[0]), genes=genes, tfs=tfs,
+                    layer_key=layer_key,
+                )
+
+        print(f"Perturbation run complete. Files saved to {output_dir}")
+
+    def _write_manifest(self, output_dir, file_name, gene, level, frac,
+                        group_name, num_cells, genes, tfs, layer_key):
+        """Provenance sidecar for a GRN file.
+
+        Rank weights are only comparable between runs sharing an identical gene
+        set, TF set, cell set and normalisation version, so a later delta step
+        needs these recorded to refuse a mismatch instead of silently returning
+        a plausible but wrong answer.
+        """
+        safe_name = str(file_name).replace(" ", "_").replace("/", "_")
+        path = os.path.join(output_dir, f"{safe_name}_GRN.manifest.json")
+        with open(path, "w") as fh:
+            json.dump({
+                "perturbed_gene": gene,
+                "perturb_level": level,
+                "cells_changed_fraction": frac,
+                "group_name": str(group_name),
+                "num_cells": num_cells,
+                "n_tfs": int(len(tfs)),
+                "n_genes": int(len(genes)),
+                "gene_set_sha1": hashlib.sha1(
+                    "\n".join(map(str, genes)).encode()).hexdigest(),
+                "tf_set_sha1": hashlib.sha1(
+                    "\n".join(map(str, tfs)).encode()).hexdigest(),
+                "model_file": str(getattr(self.model, "model_file", None)),
+                "layer_key": layer_key,
+                "normalisation_version": 2,   # 2 = column rank divided by n_q
+            }, fh, indent=2)
 
     def preprocess_adata(self, adata, group_key, gene_key, layer_key):
         """
@@ -102,7 +208,7 @@ class AttentionGRNProcessor:
             torch.isin(tokenized_data["genes"][0], tf_token_ids)
         )[0]
         
-        print(len(tf_indices_tokenized))
+        #print(len(tf_indices_tokenized))
         
         padding_mask = tokenized_data["genes"].eq(self.model.vocab[self.model.pad_token])
 
@@ -162,11 +268,13 @@ class AttentionGRNProcessor:
             
     
     @staticmethod
-    def save_grn(grn:pd.DataFrame, output_dir:str, file_name:str):
+    def save_grn(grn:pd.DataFrame, output_dir:str, file_name:str, compress:bool=False):
         os.makedirs(output_dir, exist_ok=True)
-        # Save to TSV
+        # Save to TSV. pandas compresses automatically on a .gz suffix; a dense
+        # run is ~100 MB per cell type, so gzip is worth it for wide screens.
         safe_name = str(file_name).replace(" ", "_").replace("/", "_")
-        file_path = os.path.join(output_dir, f"{safe_name}_GRN.tsv")
+        ext = "tsv.gz" if compress else "tsv"
+        file_path = os.path.join(output_dir, f"{safe_name}_GRN.{ext}")
         grn.to_csv(file_path, sep='\t', index=False)
         print(f" -> Saved {len(grn)} links for {file_name}")
 
