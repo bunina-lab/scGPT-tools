@@ -347,24 +347,40 @@ class scGPTModel():
                 #rank = torch.argsort(order, dim=1)
                 #attn_scores = (rank.reshape((-1, self.nheads, M, M))/M).permute(0, 1, 3, 2)
 
-                # Column normalisation
+                # Column normalisation.
+                # Ranks here run over n_q queries, so the divisor is n_q -- NOT M.
+                # scGPT's tutorial normalises a square M x M matrix, where n_q == M
+                # makes both passes divide by M; with a TF-restricted query matrix
+                # (n_q=508, M=4001) dividing by M capped every weight at 507/4001.
+                # This is normalisation_version 2 in the GRN manifests: files written
+                # before this fix are on a different scale and must not be diffed
+                # against files written after it.
                 attn_scores = attn_scores.permute(0, 1, 3, 2).reshape(-1, n_q)
                 rank = torch.argsort(torch.argsort(attn_scores, dim=1), dim=1)
-                attn_scores = (rank.reshape(-1, self.nheads, M, n_q).float() / M).permute(0, 1, 3, 2)
+                attn_scores = (rank.reshape(-1, self.nheads, M, n_q).float() / n_q).permute(0, 1, 3, 2)
 
                 # Average 8 attention heads
                 attn_scores = attn_scores.mean(1)
                 
                 outputs = attn_scores.detach().cpu().numpy()
-                print(outputs.shape)
-                
+
+                keep = slice(None) if query_ids is None else slice(1, None)  ## Drops the <cls> column
                 for index in range(cur_bs):
                     # Keep track of sum per condition
-                    c = condition_ids[i : i + cur_bs][index]
+                    c = int(condition_ids[i : i + cur_bs][index])
                     if c not in dict_sum_condition:
-                        dict_sum_condition[c] = outputs[index, :, :] if query_ids is None else outputs[index, :, 1:] ## Handles <cls> token
-                    else:
-                        dict_sum_condition[c] += outputs[index, :, :] if query_ids is None else outputs[index, :, 1:] ## Handles <cls> token
+                        # np.zeros, not a slice of `outputs`: assigning the slice
+                        # directly stores a numpy VIEW, which pins the whole
+                        # (batch, n_q, M) float32 array alive for the entire run
+                        # (~519 MB per condition). float64 because thousands of
+                        # additions of float32 values separated by 1/M lose precision.
+                        dict_sum_condition[c] = np.zeros(
+                            outputs[index, :, keep].shape, dtype=np.float64
+                        )
+                    # Always accumulate. scGPT's notebook zeroes on first sight and
+                    # only += in the else branch, silently dropping the first cell of
+                    # every condition; do not reproduce that.
+                    dict_sum_condition[c] += outputs[index, :, keep]
             
         return dict_sum_condition
     

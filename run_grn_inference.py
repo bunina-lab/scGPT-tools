@@ -6,7 +6,18 @@ def execute(args):
     import os
     from utils import load_model
     import json
-    
+
+    # Validate perturbation arguments BEFORE loading the model, which takes
+    # minutes; a typo in --perturb-level should not cost a model load.
+    if args.perturb_genes:
+        if not args.use_attention:
+            raise SystemExit(
+                "--perturb-genes requires --use-attention: perturbed GRNs are "
+                "derived from the attention layer."
+            )
+        from lib.insilico_perturb import parse_level
+        parse_level(args.perturb_level)   # raises ValueError on a bad level
+
     print("Loading scGPT model...")
     model = load_model(
         model_path=args.model_path,
@@ -44,14 +55,27 @@ def execute(args):
     for adata_path in args.query_h5ad:
         out_dir_path = os.path.join(args.output_dir, os.path.basename(adata_path).split(".")[0].replace(" ", "_").strip()) 
         os.makedirs(out_dir_path, exist_ok=True)
-        if args.use_attention:
+        if args.use_attention and args.perturb_genes:
+            annotator.process_perturbed_grn(
+                adata=anndata.read_h5ad(adata_path),
+                layer_key=args.layer_key,
+                gene_key=args.gene_column,
+                group_key=args.cell_column,
+                output_dir=out_dir_path,
+                perturb_genes=args.perturb_genes,
+                level=args.perturb_level,
+                threshold_weight=args.attention_threshold,
+                batch_size=args.batch_size,
+                compress=args.compress_output,
+            )
+        elif args.use_attention:
             annotator.process(
                 adata=anndata.read_h5ad(adata_path),
                 layer_key=args.layer_key,
                 gene_key=args.gene_column,
                 group_key=args.cell_column,
                 output_dir=out_dir_path,
-                threshold_weight=args.min_similarity_threshold,
+                threshold_weight=args.attention_threshold,
                 batch_size = args.batch_size
                 
             )
@@ -100,6 +124,29 @@ if __name__ == "__main__":
                         help='Minimum number of features that should be included in a GRN')
 
     parser.add_argument('--use-attention', action='store_true', help='Rather to use attention layer of the transformer')
+
+    parser.add_argument('--attention-threshold', type=float, default=0.0,
+                        help='Minimum |weight| for an attention GRN link. Default 0.0 '
+                             'keeps the dense n_TFs x n_genes output. Distinct from '
+                             '--min-similarity-threshold, which is a cosine-similarity '
+                             'cutoff on a different scale.')
+
+    parser.add_argument('--perturb-genes', nargs='+', default=None,
+                        help='Explicit gene/TF symbols to perturb in silico. Triggers a '
+                             'perturbed-GRN run instead of the plain one. Nothing is '
+                             'perturbed unless named here.')
+
+    parser.add_argument('--perturb-level', default='bin:0',
+                        help="Target expression level for --perturb-genes. "
+                             "bin:N = absolute bin; q:P = the P-quantile of each cell's "
+                             "own nonzero bins; ko = bin:0; max = the highest bin; "
+                             "sham = unchanged (null control). Fold-changes are not "
+                             "expressible: X_binned holds per-cell quantile ranks, so "
+                             "multiplying a bin has no meaning.")
+
+    parser.add_argument('--compress-output', action='store_true',
+                        help='Write .tsv.gz instead of .tsv. A dense run is ~100 MB per '
+                             'cell type; gzip typically cuts that 5-10x.')
 
     parser.add_argument('--batch-size',type=int, default=16, help='Batch size for attention layer')
     

@@ -1,0 +1,65 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# scGPT in-silico perturbation — Job Config
+#
+#   sbatch scGPT_GRN_perturb.sh config_scGPT_GRN_perturb.yaml
+#   sbatch scGPT_GRN_perturb.sh config_scGPT_GRN_perturb.yaml bin:0   # level override
+#
+# SLURM resource overrides go on the command line, not here:
+#   sbatch --time=12:00:00 --mem=256G scGPT_GRN_perturb.sh this_file.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+
+paths:
+  grn_script: /fast/AG_Bunina/Berk/projects/scGPT/scripts/run_grn_inference.py
+
+  query_h5ad: /fast/AG_Bunina/Berk/workdir/grn_benchmarking/scE2G_ENgreitz_Lab_samples/grn_inference/scgpt/finetuned_model/adata_scgpt.h5ad
+  tf_path: /fast/AG_Bunina/annotations/GRCh38_2025/HumanTF_list.txt
+
+  model_pt:    /fast/AG_Bunina/Berk/workdir/grn_benchmarking/scE2G_ENgreitz_Lab_samples/grn_inference/scgpt/finetuned_model/best_model.pt
+  model_args:  /fast/AG_Bunina/Berk/workdir/grn_benchmarking/scE2G_ENgreitz_Lab_samples/grn_inference/scgpt/finetuned_model/args.json
+  model_vocab: /fast/AG_Bunina/Berk/workdir/grn_benchmarking/scE2G_ENgreitz_Lab_samples/grn_inference/scgpt/finetuned_model/vocab.json
+
+  # A subdirectory per level is created automatically, so the three verification
+  # runs (sham / bin:0 / q:0.9) do not overwrite each other's manifests.
+  output_dir: /fast/AG_Bunina/Berk/workdir/grn_benchmarking/scE2G_ENgreitz_Lab_samples/grn_inference/scgpt/grn_perturb
+
+run:
+  cell_column: "celltype"
+  gene_column: "index"
+  layer_key: "X_binned"
+
+  # 508 TFs x 4001 tokens x 8 heads: the two argsort passes need roughly
+  # batch_size x 390 MB of int64/float32 buffers.
+  #   batch 16 -> ~6 GB   batch 32 -> ~13 GB   batch 64 -> ~25 GB
+  # A40 has 48 GB, so 32 leaves comfortable headroom. Raise to 64 on A100-80G.
+  batch_size: 32
+
+  # Genes/TFs to perturb. Explicit list only - nothing runs unless named here.
+  # Each gene costs one full forward pass (~10-15 min over ~14.5k cells on A40)
+  # and writes one GRN per cell type (~100 MB each, 5 cell types).
+  perturb_genes:
+    - GATA1
+
+  # bin:N  absolute bin
+  # q:P    the P-quantile of each cell's OWN nonzero bins (cell-adaptive)
+  # ko     alias for bin:0 - gene reads as not expressed
+  # max    that cell's highest bin
+  # sham   unchanged; the null control, must reproduce the unperturbed GRN exactly
+  #
+  # Fold-changes are NOT expressible: X_binned holds per-cell quantile ranks,
+  # so multiplying a bin has no meaning.
+  # Overridden by the optional 2nd argument to sbatch.
+  perturb_level: "sham"
+
+  # 0.0 keeps the dense 508 x 4000 output. Distinct from the cosine-similarity
+  # cutoff used by the embedding-based GRN path.
+  attention_threshold: 0.0
+
+  # Write .tsv.gz instead of .tsv. Cuts ~100 MB per cell type by 5-10x.
+  compress_output: false
+
+  extra_args: ""
+
+env:
+  conda_env:      scGPTpy310
+  guix_profile:   ~/.guix-profile
+  micromamba_bin: ~/bin/micromamba
